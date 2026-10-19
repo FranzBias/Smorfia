@@ -2177,7 +2177,7 @@ class Smorfia(Gtk.Window):
         label2.set_xalign(0)
         label2.set_line_wrap(True)
         label2.set_markup(
-            self.tr("update.step2", base_dir=escape_markup(USER_CONFIG_DIR))
+            self.tr("update.step2", base_dir=escape_markup(USER_CONFIG_DIR.replace(os.path.expanduser("~"), "~", 1)))
         )
         content.pack_start(label2, False, False, 0)
 
