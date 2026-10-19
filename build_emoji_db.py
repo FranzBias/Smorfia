@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build the emoji database for GeppEmoji.
+Build the emoji database for Smorfia.
 
 This script parses the official Unicode emoji-test.txt file and generates
 `emoji_data.json`, optionally applying local overrides from
@@ -266,7 +266,7 @@ def main():
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, indent=2)
 
-    print("Done! You can now use emoji_data.json with GeppEmoji.")
+    print("Done! You can now use emoji_data.json with Smorfia.")
 
 
 if __name__ == "__main__":

@@ -1,34 +1,141 @@
 #!/usr/bin/env python3
-import gi
-gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk, GLib
+
+######################################################
+######################################################
+##                     Smorfia                      ##
+##           A small desktop emoji picker           ##
+##             written in Python + GTK3             ##
+##                                                  ##
+##       by FranzBias 2025-2026 (ex GeppEmoji)      ##
+##           https://github.com/FranzBias           ##
+######################################################
+######################################################
+##          Licensed under the MIT License.         ##
+##        See LICENSE file for full license.        ##
+######################################################
+######################################################
 
 import json
-import os
-import sys
 import locale
-import subprocess
+import logging
+import os
 import re
+import shutil
+import subprocess
+import sys
 import zipfile
 from datetime import datetime
 
-APP_NAME = "GeppEmoji"
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib, GObject
+
+logger = logging.getLogger(__name__)
+
+
+def detect_auto_paste_support():
+    """
+    Detect whether auto-paste via xdotool is usable in the current session.
+
+    Returns a dict like:
+        {
+            "session_type": "x11" | "wayland" | "unknown",
+            "has_xdotool": bool,
+            "auto_paste_available": bool,
+        }
+    """
+    session_type_raw = os.environ.get("XDG_SESSION_TYPE", "").strip().lower()
+
+    if session_type_raw in ("x11", "xorg"):
+        session_type = "x11"
+    elif session_type_raw == "wayland":
+        session_type = "wayland"
+    else:
+        session_type = "unknown"
+
+    has_xdotool = shutil.which("xdotool") is not None
+
+    # Auto-paste only makes sense on X11 when xdotool is available
+    auto_paste_available = (session_type == "x11") and has_xdotool
+
+    logger.debug(
+        "Auto-paste env: session_type=%s raw=%r has_xdotool=%s auto_paste_available=%s",
+        session_type,
+        session_type_raw,
+        has_xdotool,
+        auto_paste_available,
+    )
+
+    return {
+        "session_type": session_type,
+        "has_xdotool": has_xdotool,
+        "auto_paste_available": auto_paste_available,
+    }
+
+
+APP_NAME = "Smorfia"
+
+
+# -----------------------------------------------------------------------------
+# Versioning
+# -----------------------------------------------------------------------------
+APP_VERSION = "2.0.0"
+BUILD = "2026-10-19a"
+
+# Base directory where the app code and default data live (/usr/share/smorfia)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-EMOJI_FILE = os.path.join(BASE_DIR, "emoji_data.json")
-RECENT_FILE = os.path.join(BASE_DIR, "emoji_recent.json")
-TRANSLATIONS_FILE = os.path.join(BASE_DIR, "emoji_translations.json")
-FAVORITES_FILE = os.path.join(BASE_DIR, "emoji_favorites.json")
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+
+# Legacy system-level files (older versions in /usr/share/smorfia)
+SYSTEM_CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+LEGACY_RECENT_FILE = os.path.join(BASE_DIR, "emoji_recent.json")
+LEGACY_FAVORITES_FILE = os.path.join(BASE_DIR, "emoji_favorites.json")
+
+# User-specific configuration and data directories
+USER_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", APP_NAME)
+USER_DATA_DIR = os.path.join(os.path.expanduser("~"), ".local", "share", APP_NAME)
+
+# Extra user paths: templates + local README
+USER_TEMPLATES_DIR = os.path.join(USER_CONFIG_DIR, "templates")
+USER_README_FILE = os.path.join(USER_CONFIG_DIR, "README.md")
+
+# Emoji database: per-user in ~/.config/Smorfia
+EMOJI_FILE = os.path.join(USER_CONFIG_DIR, "emoji_data.json")
+
+# emoji_translations.json now lives in the user config directory
+TRANSLATIONS_FILE = os.path.join(USER_CONFIG_DIR, "emoji_translations.json")
+
+# Legacy user-data locations (older versions used ~/.local/share/Smorfia)
+LEGACY_USER_RECENT_FILE = os.path.join(USER_DATA_DIR, "emoji_recent.json")
+LEGACY_USER_FAVORITES_FILE = os.path.join(USER_DATA_DIR, "emoji_favorites.json")
+
+# New user-level paths (final: all in ~/.config/Smorfia)
+CONFIG_FILE = os.path.join(USER_CONFIG_DIR, "config.json")
+RECENT_FILE = os.path.join(USER_CONFIG_DIR, "emoji_recent.json")
+FAVORITES_FILE = os.path.join(USER_CONFIG_DIR, "emoji_favorites.json")
+
+# Pre-2.0 name of the app: user data is migrated from here on first start
+LEGACY_APP_NAME = "GeppEmoji"
+LEGACY_APP_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", LEGACY_APP_NAME)
+
+# Locales and public URL for the official emoji-test.txt file
 LOCALES_DIR = os.path.join(BASE_DIR, "locales")
 EMOJI_TEST_URL = "https://unicode.org/Public/emoji/latest/emoji-test.txt"
 
 DEFAULT_CONFIG = {
     "theme": "system",          # "system", "light", "dark"
-    "columns": 6,
+    "columns": 10,
     "max_recent": 40,
-    "emoji_font_size": 22,
+    "emoji_font_size": 28,
     "language": "system",       # "system" or "en"/"it"/"de"/...
-    "debug": False
+    "debug": False,
+    "remember_window": True,    # remember window size/position between runs
+
+    # Window geometry (nullable: None → no stored geometry yet)
+    "window_width": 460,
+    "window_height": 580,
+    "window_x": None,
+    "window_y": None,
 }
 
 # Skin tone modifiers (empty = default)
@@ -67,12 +174,26 @@ DEFAULT_I18N = {
     "category.all": "All",
     "category.recent": "Recent",
     "category.favorites": "Favorites",
+    "category.smileys_emotion": "Smileys & Emotion",
+    "category.people_body": "People & Body",
+    "category.animals_nature": "Animals & Nature",
+    "category.food_drink": "Food & Drink",
+    "category.travel_places": "Travel & Places",
+    "category.activities": "Activities",
+    "category.objects": "Objects",
+    "category.symbols": "Symbols",
+    "category.flags": "Flags",
+    "category.component": "Components",
+    "category.other": "Other",
+
+    "tooltip.my_tags": "My tags",
+    "tooltip.keywords_en": "Keywords",
 
     "search.placeholder": "Search emoji...",
 
     "instructions.title": "Instructions",
     "instructions.body": (
-        "How to use GeppEmoji:\n\n"
+        "How to use Smorfia:\n\n"
         "- On startup it shows the 'Recent' category and focuses the search entry.\n"
         "- Choose a category or use 'Recent' to see your last used emoji.\n"
         "- Type in the search box to filter emoji by name or keyword.\n\n"
@@ -86,7 +207,7 @@ DEFAULT_I18N = {
 
     "shortcuts.title": "Shortcuts",
     "shortcuts.body": (
-        "Keyboard and mouse shortcuts in GeppEmoji:\n\n"
+        "Keyboard and mouse shortcuts in Smorfia:\n\n"
         "- Arrow keys: move between emoji.\n"
         "- Enter: insert and paste the current emoji (plus any emoji already in the buffer).\n"
         "- Shift + Enter: add to buffer, do not paste.\n"
@@ -133,6 +254,10 @@ DEFAULT_I18N = {
 
     "msg.error.xdotool_activate": "Error using xdotool (windowactivate): {error}",
     "msg.error.xdotool_key": "Error using xdotool (key ctrl+v): {error}",
+    "msg.info.clipboard_only": (
+        "Auto-paste is not available in this session. "
+        "Emoji have been copied to the clipboard; use Ctrl+V to paste."
+    ),
 
     # Preferences / config
     "prefs.title": "Preferences",
@@ -145,6 +270,7 @@ DEFAULT_I18N = {
     "prefs.font_size": "Emoji font size",
     "prefs.language": "Language",
     "prefs.language.system": "System default",
+    "prefs.remember_window": "Remember window size and position",
     "prefs.debug": "Enable debug log (also richer tooltips)",
     "prefs.open_translations": "Open emoji_translations.json",
     "prefs.open_config": "Open config.json",
@@ -156,29 +282,185 @@ DEFAULT_I18N = {
     "prefs.backup_error_title": "Backup error",
     "prefs.backup_error_body": "Error during backup:\n{error}",
     "prefs.restore_done_title": "Backup restored",
-    "prefs.restore_done_body": "Backup restored.\nYou may need to restart GeppEmoji.",
+    "prefs.restore_done_body": "Backup restored.\nYou may need to restart Smorfia.",
     "prefs.restore_error_title": "Restore error",
     "prefs.restore_error_body": "Error during restore:\n{error}",
     "prefs.language_changed_title": "Language changed",
-    "prefs.language_changed_body": "Language will be applied next time you start GeppEmoji.",
+    "prefs.language_changed_body": "Language will be applied next time you start Smorfia.",
 
     # Status bar
     "status.results": "{count} emoji shown",
     "status.buffer": "Buffer: {buf}",
+    "status.autopaste.enabled": "Auto-paste: enabled",
+    "status.autopaste.clipboard_only": "Auto-paste: clipboard only (use Ctrl+V)",
+    "status.autopaste.disabled": "Auto-paste: disabled",
 
     # Skin tone bar
     "skin.label": "Skin tone:",
     "skin.dialog.title": "Choose default skin tone",
 }
 
+def make_user_files_writable():
+    """Add the owner's write permission to every file in USER_CONFIG_DIR."""
+    try:
+        for root, _dirs, files in os.walk(USER_CONFIG_DIR):
+            for name in files:
+                path = os.path.join(root, name)
+                mode = os.stat(path).st_mode
+                if not mode & 0o200:
+                    os.chmod(path, mode | 0o200)
+    except Exception as e:
+        print(f"[Smorfia] Could not fix permissions in {USER_CONFIG_DIR}: {e}", file=sys.stderr)
+
+
+def initialize_user_environment():
+    """
+    Ensure that ~/.config/Smorfia contains all the user files:
+
+    - config.json
+    - emoji_translations.json
+    - emoji_recent.json
+    - emoji_favorites.json
+    - README.md
+    - templates/ (directory)
+
+    and migrate any legacy files from BASE_DIR or ~/.local/share/Smorfia.
+    """
+    # 0) One-time migration from the old name (GeppEmoji -> Smorfia):
+    #    copy ~/.config/GeppEmoji to ~/.config/Smorfia, never move or delete it.
+    try:
+        if not os.path.exists(USER_CONFIG_DIR) and os.path.isdir(LEGACY_APP_CONFIG_DIR):
+            shutil.copytree(LEGACY_APP_CONFIG_DIR, USER_CONFIG_DIR)
+            print(f"[Smorfia] Migrated user data from {LEGACY_APP_CONFIG_DIR}", file=sys.stderr)
+    except Exception as e:
+        print(f"[Smorfia] Migration from {LEGACY_APP_CONFIG_DIR} failed: {e}", file=sys.stderr)
+
+    # Ensure config dir exists
+    try:
+        os.makedirs(USER_CONFIG_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+    # 0b) Seed the per-user emoji database from the shipped copy (first run)
+    try:
+        shipped_db = os.path.join(BASE_DIR, "emoji_data.json")
+        if not os.path.exists(EMOJI_FILE) and os.path.exists(shipped_db):
+            shutil.copyfile(shipped_db, EMOJI_FILE)
+    except Exception as e:
+        print(f"[Smorfia] Could not copy emoji_data.json: {e}", file=sys.stderr)
+
+    # 0c) User files must stay writable even if they were copied from a
+    #     read-only system folder (e.g. /usr/share/smorfia with the .deb)
+    make_user_files_writable()
+
+    # 1) Migrate legacy recent/favorites from old user-data dir to new config dir
+    try:
+        if os.path.exists(LEGACY_USER_RECENT_FILE) and not os.path.exists(RECENT_FILE):
+            os.makedirs(os.path.dirname(RECENT_FILE), exist_ok=True)
+            shutil.move(LEGACY_USER_RECENT_FILE, RECENT_FILE)
+    except Exception:
+        pass
+
+    try:
+        if os.path.exists(LEGACY_USER_FAVORITES_FILE) and not os.path.exists(FAVORITES_FILE):
+            os.makedirs(os.path.dirname(FAVORITES_FILE), exist_ok=True)
+            shutil.move(LEGACY_USER_FAVORITES_FILE, FAVORITES_FILE)
+    except Exception:
+        pass
+
+    # 2) Migrate legacy emoji_translations.json from BASE_DIR to user config
+    try:
+        legacy_translations = os.path.join(BASE_DIR, "emoji_translations.json")
+        if os.path.exists(legacy_translations) and not os.path.exists(TRANSLATIONS_FILE):
+            os.makedirs(os.path.dirname(TRANSLATIONS_FILE), exist_ok=True)
+            shutil.copy2(legacy_translations, TRANSLATIONS_FILE)
+    except Exception:
+        pass
+
+    # 3) Ensure config.json exists (if not, create from DEFAULT_CONFIG)
+    if not os.path.exists(CONFIG_FILE):
+        try:
+            os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    # 4) Ensure emoji_recent.json exists
+    if not os.path.exists(RECENT_FILE):
+        try:
+            os.makedirs(os.path.dirname(RECENT_FILE), exist_ok=True)
+            with open(RECENT_FILE, "w", encoding="utf-8") as f:
+                json.dump([], f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    # 5) Ensure emoji_favorites.json exists
+    if not os.path.exists(FAVORITES_FILE):
+        try:
+            os.makedirs(os.path.dirname(FAVORITES_FILE), exist_ok=True)
+            with open(FAVORITES_FILE, "w", encoding="utf-8") as f:
+                json.dump([], f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    # 6) Ensure emoji_translations.json exists (if not created above)
+    if not os.path.exists(TRANSLATIONS_FILE):
+        try:
+            os.makedirs(os.path.dirname(TRANSLATIONS_FILE), exist_ok=True)
+            with open(TRANSLATIONS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"by_char": {}}, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    # 7) Ensure templates/ directory exists
+    try:
+        os.makedirs(USER_TEMPLATES_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+    # 8) Ensure local README.md exists (copy from BASE_DIR if available)
+    if not os.path.exists(USER_README_FILE):
+        system_readme = os.path.join(BASE_DIR, "README.md")
+        try:
+            if os.path.exists(system_readme):
+                os.makedirs(os.path.dirname(USER_README_FILE), exist_ok=True)
+                shutil.copy2(system_readme, USER_README_FILE)
+            else:
+                os.makedirs(os.path.dirname(USER_README_FILE), exist_ok=True)
+                with open(USER_README_FILE, "w", encoding="utf-8") as f:
+                    f.write(
+                        "# Smorfia\n\n"
+                        "This folder contains your personal configuration files\n"
+                        "for Smorfia (config, translations, recents, favorites, templates).\n"
+                    )
+        except Exception:
+            pass
 
 def get_system_language():
     """Return the system language (e.g. 'it', 'de', 'en')."""
-    lang, enc = locale.getdefaultlocale()
-    if lang:
-        return lang.split("_")[0]
-    return "en"
 
+    # Set locale based on environment vars (LANG, LC_ALL, etc.)
+    # This avoids warnings and makes getlocale() reliable
+    try:
+        locale.setlocale(locale.LC_ALL, '')
+    except Exception:
+        pass  # Ignore if locale is not correctly configured on the system
+
+    # Query locale safely (replacement for deprecated getdefaultlocale)
+    lang_tuple = locale.getlocale()  # e.g. ('it_IT', 'UTF-8')
+    lang = lang_tuple[0] if lang_tuple and lang_tuple[0] else None
+
+    if lang:
+        return lang.split("_")[0]  # 'it_IT' → 'it'
+
+    # Secondary fallback: try environment LANG variable
+    lang_env = os.environ.get("LANG", "")
+    if lang_env:
+        return lang_env.split("_")[0]
+
+    # Final fallback
+    return "en"
 
 def load_locale(lang):
     """
@@ -203,12 +485,29 @@ def load_locale(lang):
 
     return {}
 
-
 def load_config():
-    """Load config.json, overlaying DEFAULT_CONFIG."""
+    """Load user config.json from $HOME, overlaying DEFAULT_CONFIG.
+
+    If it does not exist yet, try to migrate from the legacy config.json
+    located next to smorfia.py (e.g. /usr/share/smorfia/config.json).
+    """
     cfg = DEFAULT_CONFIG.copy()
+
+    # Ensure user config directory exists
+    os.makedirs(USER_CONFIG_DIR, exist_ok=True)
+
+    # First run: migrate legacy system-level config.json if present
+    if not os.path.exists(CONFIG_FILE) and os.path.exists(SYSTEM_CONFIG_FILE):
+        try:
+            shutil.copy2(SYSTEM_CONFIG_FILE, CONFIG_FILE)
+        except Exception as e:
+            print(f"Error migrating config.json from legacy location: {e}", file=sys.stderr)
+
+    # If we still don't have a config file, just return defaults
     if not os.path.exists(CONFIG_FILE):
         return cfg
+
+    # Load user config and overlay defaults
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -216,16 +515,113 @@ def load_config():
             cfg.update(data)
     except Exception as e:
         print(f"Error loading config.json: {e}", file=sys.stderr)
+
     return cfg
 
-
 def save_config(cfg):
-    """Save configuration to config.json."""
+    """Save user configuration to config.json in $HOME."""
     try:
+        os.makedirs(USER_CONFIG_DIR, exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"Error saving config.json: {e}", file=sys.stderr)
+
+
+# Icons shown next to each category in the left sidebar.
+CATEGORY_ICONS = {
+    "All": "🌐",
+    "Recent": "🕘",
+    "Favorites": "⭐",
+    "Smileys & Emotion": "😀",
+    "People & Body": "👋",
+    "Animals & Nature": "🐻",
+    "Food & Drink": "🍔",
+    "Travel & Places": "✈️",
+    "Activities": "⚽",
+    "Objects": "💡",
+    "Symbols": "🔣",
+    "Flags": "🏁",
+    "Component": "🧩",
+}
+
+
+def category_i18n_key(cat):
+    """Map a raw category name to its i18n key ('Food & Drink' -> 'category.food_drink')."""
+    slug = re.sub(r"[^a-z0-9]+", "_", cat.lower()).strip("_")
+    return "category." + slug
+
+
+class CategorySidebar(Gtk.ScrolledWindow):
+    """Vertical list of categories (icon + name) on the left side of the window.
+
+    It deliberately offers the same small API the old Gtk.ComboBoxText had
+    (append / remove_all / get_active_id / set_active_id / set_active and a
+    "changed" signal), so the rest of the code did not need to change.
+    """
+
+    __gsignals__ = {"changed": (GObject.SignalFlags.RUN_FIRST, None, ())}
+
+    def __init__(self):
+        super().__init__()
+        self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        try:
+            self.set_propagate_natural_width(True)
+        except AttributeError:
+            self.set_size_request(170, -1)
+        self.get_style_context().add_class("category-sidebar")
+
+        self.listbox = Gtk.ListBox()
+        self.listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.listbox.connect("row-selected", self._on_row_selected)
+        self.add(self.listbox)
+
+    def _on_row_selected(self, listbox, row):
+        if row is not None:
+            self.emit("changed")
+
+    def append(self, cat_id, label, icon=""):
+        row = Gtk.ListBoxRow()
+        row.cat_id = cat_id
+        row.set_tooltip_text(label)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        box.set_margin_start(6)
+        box.set_margin_end(10)
+        box.set_margin_top(3)
+        box.set_margin_bottom(3)
+
+        icon_label = Gtk.Label(label=icon or "•")
+        icon_label.get_style_context().add_class("cat-icon")
+        box.pack_start(icon_label, False, False, 0)
+
+        name_label = Gtk.Label(label=label)
+        name_label.set_xalign(0)
+        box.pack_start(name_label, True, True, 0)
+
+        row.add(box)
+        row.show_all()
+        self.listbox.add(row)
+
+    def remove_all(self):
+        for row in list(self.listbox.get_children()):
+            self.listbox.remove(row)
+
+    def get_active_id(self):
+        row = self.listbox.get_selected_row()
+        return getattr(row, "cat_id", None) if row else None
+
+    def set_active_id(self, cat_id):
+        for row in self.listbox.get_children():
+            if getattr(row, "cat_id", None) == cat_id:
+                self.listbox.select_row(row)
+                return True
+        return False
+
+    def set_active(self, index):
+        row = self.listbox.get_row_at_index(index)
+        if row is not None:
+            self.listbox.select_row(row)
 
 
 def escape_markup(text):
@@ -239,16 +635,14 @@ def escape_markup(text):
     )
 
 
-class GeppEmoji(Gtk.Window):
+class Smorfia(Gtk.Window):
     def __init__(self):
         Gtk.Window.__init__(self, title=APP_NAME)
-        self.set_default_size(460, 580)
         self.set_border_width(6)
-        self.set_position(Gtk.WindowPosition.CENTER)
-        self.get_style_context().add_class("geppemoji-window")
+        self.get_style_context().add_class("smorfia-window")
 
         # Try to set a custom window icon from local file
-        icon_path = os.path.join(BASE_DIR, "geppemoji.png")
+        icon_path = os.path.join(BASE_DIR, "smorfia.png")
         if os.path.exists(icon_path):
             try:
                 self.set_icon_from_file(icon_path)
@@ -257,6 +651,30 @@ class GeppEmoji(Gtk.Window):
 
         # Load configuration
         self.config = load_config()
+
+        # Apply initial geometry depending on preference
+        remember = bool(self.config.get("remember_window", True))
+        if remember:
+            # Use stored size/position (if available)
+            width = int(self.config.get("window_width", DEFAULT_CONFIG["window_width"]) or DEFAULT_CONFIG["window_width"])
+            height = int(self.config.get("window_height", DEFAULT_CONFIG["window_height"]) or DEFAULT_CONFIG["window_height"])
+            self.set_default_size(width, height)
+
+            x = self.config.get("window_x")
+            y = self.config.get("window_y")
+            if isinstance(x, int) and isinstance(y, int) and x >= 0 and y >= 0:
+                # Restore previous position
+                self.move(x, y)
+            else:
+                # Fallback: center on first run
+                self.set_position(Gtk.WindowPosition.CENTER)
+        else:
+            # Do NOT restore previous geometry → use defaults & center
+            self.set_default_size(
+                DEFAULT_CONFIG["window_width"],
+                DEFAULT_CONFIG["window_height"],
+            )
+            self.set_position(Gtk.WindowPosition.CENTER)
 
         # Current skin tone index (0..5)
         self.current_skin_tone = 0
@@ -281,8 +699,18 @@ class GeppEmoji(Gtk.Window):
         # Apply theme (light/dark/system)
         self.apply_theme()
 
-        # Window that had focus before GeppEmoji was opened
-        self.target_window = self.get_previous_window_id()
+        # Detect environment for auto-paste (X11 + xdotool)
+        env_info = detect_auto_paste_support()
+        self.session_type = env_info["session_type"]
+        self.has_xdotool = env_info["has_xdotool"]
+        self.auto_paste_available = env_info["auto_paste_available"]
+
+        self.auto_paste_enabled = bool(self.auto_paste_available)
+        # Window that had focus before Smorfia was opened (only if auto-paste is available)
+        if self.auto_paste_available:
+            self.target_window = self.get_previous_window_id()
+        else:
+            self.target_window = None
 
         # Load emoji list and apply translations
         self.emoji_list = self.load_emoji_data()
@@ -301,8 +729,8 @@ class GeppEmoji(Gtk.Window):
         # Buffer for multi-emoji paste
         self.buffer_emojis = []
 
-        # Categories (All / Recent / Favorites / per category)
-        self.categories = self.collect_categories(self.emoji_list)
+        # Categories (All / Recent / Favorites / per-category)
+        self.categories = []
 
         # Main layout
         main_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -310,7 +738,7 @@ class GeppEmoji(Gtk.Window):
 
         # Menu bar
         menubar = Gtk.MenuBar()
-        menu_root = Gtk.MenuItem(label=self.tr("menu.root"))
+        menu_root = Gtk.MenuItem(label="☰  " + self.tr("menu.root"))
         menubar.append(menu_root)
         menu = Gtk.Menu()
         menu_root.set_submenu(menu)
@@ -318,6 +746,8 @@ class GeppEmoji(Gtk.Window):
         mi_instr = Gtk.MenuItem(label=self.tr("menu.instructions"))
         mi_instr.connect("activate", self.on_menu_instructions)
         menu.append(mi_instr)
+
+        menu.append(Gtk.SeparatorMenuItem())
 
         mi_short = Gtk.MenuItem(label=self.tr("menu.shortcuts"))
         mi_short.connect("activate", self.on_menu_shortcuts)
@@ -342,34 +772,15 @@ class GeppEmoji(Gtk.Window):
         menubar.show_all()
         main_vbox.pack_start(menubar, False, False, 0)
 
-        # Top row: categories + search
+        # Top row: search only (categories moved to the left sidebar)
         top_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         main_vbox.pack_start(top_box, False, False, 0)
 
-        # Category combo (internal IDs + localized labels)
-        self.category_combo = Gtk.ComboBoxText()
-        for cat in self.categories:
-            if cat == "All":
-                cat_id = "All"
-                label = self.tr("category.all")
-            elif cat == "Recent":
-                cat_id = "Recent"
-                label = self.tr("category.recent")
-            elif cat == "Favorites":
-                cat_id = "Favorites"
-                label = self.tr("category.favorites")
-            else:
-                cat_id = cat
-                label = cat
-            self.category_combo.append(cat_id, label)
-
-        if "Recent" in self.categories:
-            self.category_combo.set_active_id("Recent")
-        else:
-            self.category_combo.set_active(0)
-
+        # Category sidebar (internal IDs + localized labels, one icon each).
+        # The attribute keeps the old name so existing callers keep working.
+        self.category_combo = CategorySidebar()
+        self.rebuild_category_combo()
         self.category_combo.connect("changed", self.on_filter_changed)
-        top_box.pack_start(self.category_combo, False, False, 0)
 
         # Search entry
         self.search_entry = Gtk.SearchEntry()
@@ -390,8 +801,15 @@ class GeppEmoji(Gtk.Window):
 
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_margin_top(10)  # spazio sopra le emoji
         scrolled.add(self.flowbox)
-        main_vbox.pack_start(scrolled, True, True, 0)
+
+        # Middle area: sidebar on the left, emoji grid on the right
+        content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        content_box.pack_start(self.category_combo, False, False, 0)
+        content_box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
+        content_box.pack_start(scrolled, True, True, 0)
+        main_vbox.pack_start(content_box, True, True, 0)
 
         # Populate emojis
         for item in self.emoji_list:
@@ -414,9 +832,53 @@ class GeppEmoji(Gtk.Window):
         GLib.idle_add(self.on_filter_changed, None)
         GLib.idle_add(self.select_first_visible_emoji)
 
-        # Global key handling
+        # Global key handling and window events
         self.connect("key-press-event", self.on_key_press)
-        self.connect("destroy", Gtk.main_quit)
+        self.connect("configure-event", self.on_configure_event)
+        self.connect("destroy", self.on_window_destroy)
+
+    # -------------------------------------------------------------------------
+    # Window geometry & application shutdown
+    # -------------------------------------------------------------------------
+
+    def save_window_geometry(self):
+        """Store current window size/position into self.config (if enabled)."""
+        # If user disabled remembering geometry, do nothing
+        if not self.config.get("remember_window", True):
+            return
+
+        try:
+            width, height = self.get_size()
+            x, y = self.get_position()
+            self.config["window_width"] = int(width)
+            self.config["window_height"] = int(height)
+            self.config["window_x"] = int(x)
+            self.config["window_y"] = int(y)
+        except Exception as e:
+            self.log("Unable to read window geometry:", e)
+
+    def on_configure_event(self, widget, event):
+        """Update window geometry in config whenever the window moves/resizes."""
+        self.save_window_geometry()
+        return False
+
+    def on_window_destroy(self, widget):
+        """Persist configuration (including geometry) when the window is destroyed."""
+        try:
+            self.save_window_geometry()
+            save_config(self.config)
+        except Exception as e:
+            self.log("Error saving config on destroy:", e)
+        Gtk.main_quit()
+
+    def close_app(self):
+        """Centralized app shutdown: save config and quit main loop."""
+        try:
+            self.save_window_geometry()
+            save_config(self.config)
+        except Exception as e:
+            self.log("Error saving config on close:", e)
+        Gtk.main_quit()
 
     # -------------------------------------------------------------------------
     # Utility / logging / translation helpers
@@ -435,14 +897,14 @@ class GeppEmoji(Gtk.Window):
     def log(self, *args):
         """Debug log (only if enabled in config)."""
         if self.config.get("debug", False):
-            print("[GeppEmoji]", *args, file=sys.stderr)
+            print("[Smorfia]", *args, file=sys.stderr)
 
     # -------------------------------------------------------------------------
     # Data loading / helpers
     # -------------------------------------------------------------------------
 
     def get_previous_window_id(self):
-        """Read the window that was focused before opening GeppEmoji."""
+        """Read the window that was focused before opening Smorfia."""
         try:
             out = subprocess.check_output(["xdotool", "getwindowfocus"], text=True)
             return out.strip()
@@ -488,6 +950,11 @@ class GeppEmoji(Gtk.Window):
                 base_kw = {}
                 item["keywords"] = base_kw
 
+            # Remember the database keywords, so tooltips can show them apart
+            # from the user's own tags.
+            if "_base_keywords" not in item:
+                item["_base_keywords"] = json.loads(json.dumps(base_kw))
+
             if isinstance(base_kw, dict):
                 for lang, new_list in kw_dict.items():
                     if not isinstance(new_list, list):
@@ -530,12 +997,15 @@ class GeppEmoji(Gtk.Window):
 
     def load_emoji_data(self):
         """Load emoji data from emoji_data.json and unify skin-tone variants."""
-        try:
-            with open(EMOJI_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            print("Errore caricando emoji_data.json:", e, file=sys.stderr)
-            data = []
+        data = []
+        for path in (EMOJI_FILE, os.path.join(BASE_DIR, "emoji_data.json")):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data:
+                    break
+            except Exception as e:
+                print(f"Error loading {path}:", e, file=sys.stderr)
 
         for item in data:
             if "favorite" not in item:
@@ -546,10 +1016,34 @@ class GeppEmoji(Gtk.Window):
         data = self.normalize_skin_tones(data)
         return data
 
+    def save_recent_list(self):
+        """Persist the recent emoji list to the user data directory."""
+        try:
+            os.makedirs(USER_CONFIG_DIR, exist_ok=True)
+            with open(RECENT_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.recent_list, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.log("Error writing emoji_recent.json:", e)
+
     def load_recent_list(self):
-        """Load the last used emoji list from emoji_recent.json."""
+        """Load the last used emoji list from the user data directory.
+
+        If the user file does not exist yet, try to migrate from the legacy
+        emoji_recent.json next to smorfia.py (e.g. /usr/share/smorfia).
+        """
+        # Ensure user data directory exists
+        os.makedirs(USER_CONFIG_DIR, exist_ok=True)
+
+        # First run: migrate legacy file if present
+        if not os.path.exists(RECENT_FILE) and os.path.exists(LEGACY_RECENT_FILE):
+            try:
+                shutil.copy2(LEGACY_RECENT_FILE, RECENT_FILE)
+            except Exception as e:
+                self.log("Error migrating emoji_recent.json from legacy location:", e)
+
         if not os.path.exists(RECENT_FILE):
             return []
+
         try:
             with open(RECENT_FILE, "r", encoding="utf-8") as f:
                 arr = json.load(f)
@@ -557,39 +1051,114 @@ class GeppEmoji(Gtk.Window):
                 return arr
         except Exception as e:
             self.log("Error reading emoji_recent.json:", e)
+
         return []
 
-    def save_recent_list(self):
-        """Persist the recent emoji list to emoji_recent.json."""
-        try:
-            with open(RECENT_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.recent_list, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            self.log("Error writing emoji_recent.json:", e)
-
     def update_recent(self, char):
-        """Update the recent emoji list with the newly used emoji."""
+        """
+        Update the 'Recent' list when an emoji is used.
+
+        This only updates the in-memory list and saves it.
+        Visual reordering of the 'Recent' tab happens later
+        when the user changes category or re-opens the app.
+        """
         if not char:
             return
+
+        # Move char to the front (if already present, remove old position)
         if char in self.recent_list:
             self.recent_list.remove(char)
+
         self.recent_list.insert(0, char)
+
+        # Enforce max size
         if len(self.recent_list) > self.max_recent:
             self.recent_list = self.recent_list[: self.max_recent]
+
+        # Keep set in sync for fast membership checks
         self.recent_set = set(self.recent_list)
+
+        # Persist to disk
         self.save_recent_list()
         self.log("Updated recent:", self.recent_list[:5], "...")
+
+        # Just refresh status bar, no live reordering of the 'Recent' grid
         self.update_status()
 
     def collect_categories(self, data):
-        """Collect all categories and add All/Recent/Favorites."""
+        """
+        Collect all categories from emoji data, ignoring 'Special',
+        and prepend the virtual categories All / Recent / Favorites.
+        """
+        PRIORITY = [
+            "Smileys & Emotion",
+            "People & Body",
+            "Animals & Nature",
+            "Food & Drink",
+            "Travel & Places",
+            "Activities",
+            "Objects",
+            "Symbols",
+            "Flags",
+        ]
+
         cats = set()
+        reserved = {"All", "Recent", "Favorites"}
+
         for item in data:
             cat = item.get("category", "Other")
-            if cat:
-                cats.add(cat)
-        cat_list = sorted(cats)
+            if not cat:
+                continue
+            # Skip virtual / reserved categories and the legacy 'Special'
+            if cat in reserved:
+                continue
+            if cat.lower() == "special":
+                continue
+            cats.add(cat)
+
+        # Order categories based on PRIORITY; unknown ones go at the bottom
+        cat_list = sorted(
+            cats,
+            key=lambda c: PRIORITY.index(c) if c in PRIORITY else 999,
+        )
+
         return ["All", "Recent", "Favorites"] + cat_list
+
+    def rebuild_category_combo(self):
+        """(Re)build the category combo based on the current emoji list."""
+
+        # Recompute categories from data
+        self.categories = self.collect_categories(self.emoji_list)
+
+        # Clear existing entries
+        self.category_combo.remove_all()
+
+        # Re-add all categories with proper labels
+        for cat in self.categories:
+            if cat == "All":
+                cat_id = "All"
+                label = self.tr("category.all")
+            elif cat == "Recent":
+                cat_id = "Recent"
+                label = self.tr("category.recent")
+            elif cat == "Favorites":
+                cat_id = "Favorites"
+                label = self.tr("category.favorites")
+            else:
+                cat_id = cat
+                key = category_i18n_key(cat)
+                label = self.tr(key)
+                if label == key:
+                    label = cat
+            self.category_combo.append(cat_id, label, CATEGORY_ICONS.get(cat_id, "•"))
+
+        # Default selection: "Recent" if available, otherwise first category
+        if "Recent" in self.categories:
+            self.category_combo.set_active_id("Recent")
+        elif self.categories:
+            self.category_combo.set_active_id(self.categories[0])
+        else:
+            self.category_combo.set_active(0)
 
     def clean_name(self, name):
         """Remove prefixes such as 'e0.6 ' from the name."""
@@ -632,7 +1201,21 @@ class GeppEmoji(Gtk.Window):
         return [k.lower() for k in keywords if isinstance(k, str)]
 
     def load_favorites(self):
-        """Load favorites from emoji_favorites.json or from emoji_data."""
+        """Load favorites from the user emoji_favorites.json or from emoji_data.
+
+        If the user file does not exist yet, try to migrate from the legacy
+        emoji_favorites.json next to smorfia.py.
+        """
+        # Ensure the user config directory exists
+        os.makedirs(os.path.dirname(FAVORITES_FILE), exist_ok=True)
+
+        # First run: migrate legacy favorites if present
+        if not os.path.exists(FAVORITES_FILE) and os.path.exists(LEGACY_FAVORITES_FILE):
+            try:
+                shutil.copy2(LEGACY_FAVORITES_FILE, FAVORITES_FILE)
+            except Exception as e:
+                self.log("Error migrating emoji_favorites.json from legacy location:", e)
+
         if os.path.exists(FAVORITES_FILE):
             try:
                 with open(FAVORITES_FILE, "r", encoding="utf-8") as f:
@@ -642,6 +1225,7 @@ class GeppEmoji(Gtk.Window):
             except Exception as e:
                 self.log("Error reading emoji_favorites.json:", e)
 
+        # Fallback: derive favorites from emoji_data.json
         favs = set()
         for item in self.emoji_list:
             if item.get("favorite"):
@@ -651,8 +1235,9 @@ class GeppEmoji(Gtk.Window):
         return favs
 
     def save_favorites(self):
-        """Save current favorites set to emoji_favorites.json."""
+        """Save current favorites set to emoji_favorites.json in user config dir."""
         try:
+            os.makedirs(os.path.dirname(FAVORITES_FILE), exist_ok=True)
             with open(FAVORITES_FILE, "w", encoding="utf-8") as f:
                 json.dump(sorted(self.favorites_set), f, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -681,6 +1266,9 @@ class GeppEmoji(Gtk.Window):
             padding: 0;
             margin: 0;
         }}
+        label.cat-icon {{
+            font-size: 18px;
+        }}
         """
         provider = Gtk.CssProvider()
         provider.load_from_data(css.encode("utf-8"))
@@ -688,7 +1276,7 @@ class GeppEmoji(Gtk.Window):
         Gtk.StyleContext.add_provider_for_screen(
             screen,
             provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_USER
+            Gtk.STYLE_PROVIDER_PRIORITY_USER,
         )
         self.emoji_css_provider = provider
 
@@ -700,17 +1288,17 @@ class GeppEmoji(Gtk.Window):
 
         if theme == "dark":
             css = """
-            .geppemoji-window {
+            .smorfia-window {
                 background-color: #222222;
                 color: #eeeeee;
             }
-            .geppemoji-window label {
+            .smorfia-window label {
                 color: #eeeeee;
             }
             """
         else:  # light
             css = """
-            .geppemoji-window {
+            .smorfia-window {
                 background-color: #ffffff;
                 color: #000000;
             }
@@ -722,7 +1310,7 @@ class GeppEmoji(Gtk.Window):
         Gtk.StyleContext.add_provider_for_screen(
             screen,
             provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
         self.theme_css_provider = provider
 
@@ -735,6 +1323,17 @@ class GeppEmoji(Gtk.Window):
         if not text:
             return text
         return "".join(ch for ch in text if ch not in SKIN_TONES[1:])
+
+    def supports_skin_tone(self, item):
+        """Return True if this emoji should receive a Fitzpatrick skin-tone modifier.
+
+        Practical rule for Smorfia: only emojis in 'People & Body' get skin tones.
+        This prevents outputs like '🍔🏿' for non-human emoji.
+        """
+        try:
+            return (item.get("category") == "People & Body")
+        except Exception:
+            return False
 
     def apply_skin_tone_to_char(self, char):
         """
@@ -781,6 +1380,7 @@ class GeppEmoji(Gtk.Window):
                 btn.handler_unblock_by_func(self.on_skin_tone_button_toggled)
 
         self.log("Skin tone set to index:", idx)
+        self.refresh_skin_tone_display()
 
     def on_menu_skin_tone(self, widget):
         """Dialog to choose default skin tone (also syncs bottom bar)."""
@@ -805,14 +1405,13 @@ class GeppEmoji(Gtk.Window):
         group = None
         radio_buttons = []
         for idx, preview in enumerate(SKIN_TONE_PREVIEWS):
-            rb = Gtk.RadioButton.new_with_label(group, preview)
+            rb = Gtk.RadioButton.new_with_label_from_widget(group, preview)
             if group is None:
                 group = rb
             if idx == self.current_skin_tone:
                 rb.set_active(True)
             box.pack_start(rb, False, False, 0)
             radio_buttons.append((idx, rb))
-
         dialog.show_all()
         resp = dialog.run()
 
@@ -828,17 +1427,57 @@ class GeppEmoji(Gtk.Window):
                     btn.set_active(i == self.current_skin_tone)
                     btn.handler_unblock_by_func(self.on_skin_tone_button_toggled)
 
+            self.refresh_skin_tone_display()
+
         dialog.destroy()
 
     # -------------------------------------------------------------------------
     # Emoji children / tooltips
     # -------------------------------------------------------------------------
 
+    def get_custom_keywords(self, item):
+        """Return the user's own tags for this emoji (all languages, no duplicates)."""
+        by_char = {}
+        if isinstance(getattr(self, "translations", None), dict):
+            by_char = self.translations.get("by_char", {}) or {}
+        entry = by_char.get(item.get("char", ""), {})
+        kw_dict = entry.get("keywords", {}) if isinstance(entry, dict) else {}
+        result = []
+        if isinstance(kw_dict, dict):
+            for words in kw_dict.values():
+                if isinstance(words, list):
+                    for w in words:
+                        if isinstance(w, str) and w.strip() and w not in result:
+                            result.append(w)
+        return result
+
+    def get_english_keywords(self, item, exclude=()):
+        """Return the database's English keywords, without the user's own tags."""
+        kw = item.get("_base_keywords", item.get("keywords", {}))
+        words = kw.get("en", []) if isinstance(kw, dict) else (kw if isinstance(kw, list) else [])
+        skip = {e.lower() for e in exclude}
+        out = []
+        for w in words:
+            if not isinstance(w, str) or w.lower() in skip or w in out:
+                continue
+            # Skip Unicode version fragments such as "e0", "e1", "7", "0".
+            if re.fullmatch(r"e?\d+", w.strip().lower()):
+                continue
+            out.append(w)
+        return out
+
     def build_tooltip_for_item(self, item):
         """Build tooltip text for an emoji (simple or rich, depending on debug)."""
         name = self.get_display_name(item)
         if not self.config.get("debug", False):
-            return name
+            lines = [name]
+            mine = self.get_custom_keywords(item)
+            if mine:
+                lines.append("🏷️ " + self.tr("tooltip.my_tags") + ": " + ", ".join(mine))
+            english = self.get_english_keywords(item, exclude=mine)[:12]
+            if english:
+                lines.append("🔤 " + self.tr("tooltip.keywords_en") + ": " + ", ".join(english))
+            return "\n".join(lines)
 
         cat = item.get("category", "Other")
         kws = self.get_all_keywords(item)
@@ -869,7 +1508,7 @@ class GeppEmoji(Gtk.Window):
         child.add(event_box)
 
         base_char = item.get("char", "?")
-        display_char = self.apply_skin_tone_to_char(base_char)
+        display_char = self.apply_skin_tone_to_char(base_char) if self.supports_skin_tone(item) else self.strip_skin_tones(base_char)
         emoji_label = Gtk.Label(label=display_char)
 
         emoji_label.set_margin_top(0)
@@ -900,6 +1539,28 @@ class GeppEmoji(Gtk.Window):
         child.item = item
         return child
 
+    def refresh_skin_tone_display(self):
+        """Update the emoji glyphs already visible in the grid to reflect the
+        currently selected skin tone, without rebuilding the whole FlowBox
+        (category/search state is left untouched)."""
+        for child in self.flowbox.get_children():
+            item = getattr(child, "item", None)
+            if not item:
+                continue
+            event_box = child.get_child()
+            if event_box is None:
+                continue
+            emoji_label = event_box.get_child()
+            if emoji_label is None:
+                continue
+            base_char = item.get("char", "?")
+            display_char = (
+                self.apply_skin_tone_to_char(base_char)
+                if self.supports_skin_tone(item)
+                else self.strip_skin_tones(base_char)
+            )
+            emoji_label.set_text(display_char)
+
     def select_first_visible_emoji(self):
         """Select the first visible emoji in the grid."""
         for child in self.flowbox.get_children():
@@ -912,7 +1573,7 @@ class GeppEmoji(Gtk.Window):
     # -------------------------------------------------------------------------
 
     def update_status(self):
-        """Update status bar with visible emoji count and buffer content."""
+        """Update status bar with visible emoji count, buffer content and auto-paste state."""
         visible_count = 0
         for child in self.flowbox.get_children():
             if child.get_visible():
@@ -923,6 +1584,17 @@ class GeppEmoji(Gtk.Window):
         if self.buffer_emojis:
             buf = "".join(self.buffer_emojis)
             text += "  |  " + self.tr("status.buffer", buf=buf)
+
+        # Auto-paste status (X11 vs Wayland / missing xdotool)
+        if hasattr(self, "auto_paste_available"):
+            if self.auto_paste_available:
+                text += "  |  " + self.tr("status.autopaste.enabled")
+            else:
+                session_type = getattr(self, "session_type", "")
+                if session_type == "wayland":
+                    text += "  |  " + self.tr("status.autopaste.clipboard_only")
+                else:
+                    text += "  |  " + self.tr("status.autopaste.disabled")
 
         if hasattr(self, "status_label"):
             self.status_label.set_text(text)
@@ -947,6 +1619,7 @@ class GeppEmoji(Gtk.Window):
 
         self.log("Filter changed:", "text=", text, "cat_id=", cat_id, "effective=", effective_cat)
 
+        # 1) Apply visibility based on search text + effective category
         for child in self.flowbox.get_children():
             item = getattr(child, "item", None)
             if not item:
@@ -975,6 +1648,27 @@ class GeppEmoji(Gtk.Window):
 
             visible = matches_text and matches_cat
             child.set_visible(visible)
+
+        # 2) In "Recent" (no search text), order according to self.recent_list
+        if effective_cat == "Recent" and not text:
+            order_index = {ch: idx for idx, ch in enumerate(self.recent_list)}
+
+            def child_recent_index(c):
+                item = getattr(c, "item", None)
+                if not isinstance(item, dict):
+                    return len(order_index)
+                ch = item.get("char", "")
+         # The smaller the index, the more recently the emoji was used
+                return order_index.get(ch, len(order_index))
+
+            children = list(self.flowbox.get_children())
+            children.sort(key=child_recent_index)
+
+        # Rebuild the FlowBox in the desired order
+            for c in list(self.flowbox.get_children()):
+                self.flowbox.remove(c)
+            for c in children:
+                self.flowbox.add(c)
 
         self.select_first_visible_emoji()
         self.update_status()
@@ -1035,8 +1729,50 @@ class GeppEmoji(Gtk.Window):
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
 
+        alt = bool(state & Gdk.ModifierType.MOD1_MASK)
         if keyval == "Escape":
-            Gtk.main_quit()
+            # If search is active, clear it; otherwise close.
+            if hasattr(self, "search_entry") and self.search_entry.get_text():
+                self.search_entry.set_text("")
+                self.on_filter_changed(None)
+                return True
+            self.close_app()
+            return True
+
+        
+        # App shortcuts (inside Smorfia window)
+        if ctrl and alt and keyval in ("e", "E"):
+            # Bring Smorfia to front
+            try:
+                self.present()
+            except Exception:
+                pass
+            return True
+
+        if ctrl and alt and keyval in ("f", "F"):
+            # Focus search
+            if hasattr(self, "search_entry"):
+                self.search_entry.grab_focus()
+            return True
+
+        if ctrl and alt and keyval in ("r", "R"):
+            # Go to Recent
+            if hasattr(self, "category_combo"):
+                self.category_combo.set_active_id("Recent")
+            return True
+
+        if ctrl and alt and keyval in ("s", "S"):
+            # Go to Favorites
+            if hasattr(self, "category_combo"):
+                self.category_combo.set_active_id("Favorites")
+            return True
+
+        if ctrl and alt and keyval in ("p", "P"):
+            # Toggle auto-paste (X11 + xdotool availability)
+            if getattr(self, "auto_paste_available", False):
+                self.auto_paste_enabled = not getattr(self, "auto_paste_enabled", True)
+                self.update_status()
+                self.log("[Smorfia] Auto-paste toggled:", self.auto_paste_enabled)
             return True
 
         if keyval in ("Return", "KP_Enter"):
@@ -1093,33 +1829,45 @@ class GeppEmoji(Gtk.Window):
         raw_char = item.get("char", "")
         if not raw_char:
             return
-        char = self.apply_skin_tone_to_char(raw_char)
+        char = self.apply_skin_tone_to_char(raw_char) if self.supports_skin_tone(item) else self.strip_skin_tones(raw_char)
         self.buffer_emojis.append(char)
         self.update_recent(char)
         self.log("Buffer now:", "".join(self.buffer_emojis))
         self.update_status()
 
     def finalize_and_paste(self, item):
-        """Add the emoji (with skin tone) to the buffer, paste everything, and close the app."""
+        """
+        Add the selected emoji (with current skin tone) to the buffer,
+        update Recents for all buffered emoji, copy the final string
+        to the clipboard (and auto-paste if available), then close the app.
+        """
         raw_char = item.get("char", "")
         if not raw_char:
             return
 
-        char = self.apply_skin_tone_to_char(raw_char)
+        # Add selected emoji (with current skin tone) to the buffer
+        char = self.apply_skin_tone_to_char(raw_char) if self.supports_skin_tone(item) else self.strip_skin_tones(raw_char)
         self.buffer_emojis.append(char)
+
+        # Update "Recent" list for all emojis in the buffer
         for ch in self.buffer_emojis:
             self.update_recent(ch)
 
+        # Build final text to copy/paste
         text = "".join(self.buffer_emojis)
         self.log("Pasting text:", text)
+
+        # Clear buffer after use
         self.buffer_emojis = []
         self.update_status()
 
+        # Copy to clipboard
         clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         clipboard.set_text(text, -1)
         clipboard.store()
 
-        if self.target_window:
+        # Try auto-paste (only on X11 + xdotool)
+        if getattr(self, "auto_paste_available", False) and getattr(self, "auto_paste_enabled", True) and self.target_window:
             try:
                 subprocess.call(
                     ["xdotool", "windowactivate", "--sync", self.target_window]
@@ -1127,11 +1875,20 @@ class GeppEmoji(Gtk.Window):
             except Exception as e:
                 self.log(self.tr("msg.error.xdotool_activate", error=e))
             try:
-                subprocess.call(["xdotool", "key", "ctrl+v"])
+                subprocess.Popen(
+                ["xdotool", "key", "--clearmodifiers", "Shift+Insert"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+                )
+
             except Exception as e:
                 self.log(self.tr("msg.error.xdotool_key", error=e))
+        else:
+            # No auto-paste: text is in the clipboard, user must paste manually
+            self.log(self.tr("msg.info.clipboard_only"))
 
-        Gtk.main_quit()
+        # Centralized shutdown: save config (including geometry) and quit
+        self.close_app()
 
     # -------------------------------------------------------------------------
     # Custom keywords editor
@@ -1277,24 +2034,106 @@ class GeppEmoji(Gtk.Window):
     # -------------------------------------------------------------------------
     # Menu actions: Instructions / Shortcuts / About / Update DB
     # -------------------------------------------------------------------------
-
     def on_menu_instructions(self, widget):
-        self.show_message(
-            self.tr("instructions.title"),
-            self.tr("instructions.body"),
-        )
+        """Show Instructions."""
+        title = self.tr("instructions.title")
+        body = self.tr("instructions.body")
+
+        if title == "instructions.title":
+            title = "Smorfia – Instructions"
+        if body == "instructions.body":
+            body = (
+                "• Click an emoji to copy it\n"
+                "• On X11, emojis are pasted automatically\n"
+                "• Recent emojis are remembered\n"
+                "• Preferences allow basic customization\n\n"
+                "More features are coming."
+            )
+
+        self.show_message(title, body, Gtk.MessageType.INFO)
+
 
     def on_menu_shortcuts(self, widget):
+        """Show available keyboard and mouse shortcuts."""
         self.show_message(
             self.tr("shortcuts.title"),
             self.tr("shortcuts.body"),
         )
 
     def on_menu_info(self, widget):
+        """Show About dialog with app information."""
         self.show_message(
             self.tr("about.title"),
             self.tr("about.body", app_name=APP_NAME),
         )
+
+
+    def _run_build_emoji_db(self):
+        """
+        Run build_emoji_db.py in BASE_DIR.
+
+        Returns:
+            True  if the script completed successfully.
+            False if there was an error (and shows an error dialog).
+        """
+        # The build runs inside the user config dir: BASE_DIR may be read-only
+        # (/usr/share/smorfia with the .deb), and the app reads EMOJI_FILE
+        # from there anyway. build_emoji_db.py works next to itself, so we
+        # copy it (and emoji-test.txt, if the user saved it in BASE_DIR).
+        emoji_test_path = os.path.join(USER_CONFIG_DIR, "emoji-test.txt")
+        print("[Smorfia] Running build_emoji_db.py")
+        print(f"[Smorfia]   work dir         = {USER_CONFIG_DIR}")
+        print(f"[Smorfia]   emoji-test.txt   = {emoji_test_path}")
+
+        try:
+            os.makedirs(USER_CONFIG_DIR, exist_ok=True)
+            shutil.copyfile(os.path.join(BASE_DIR, "build_emoji_db.py"),
+                            os.path.join(USER_CONFIG_DIR, "build_emoji_db.py"))
+            base_test = os.path.join(BASE_DIR, "emoji-test.txt")
+            if os.path.exists(base_test) and not os.path.exists(emoji_test_path):
+                shutil.copyfile(base_test, emoji_test_path)
+            make_user_files_writable()
+            subprocess.check_call(
+                [sys.executable, "build_emoji_db.py"],
+                cwd=USER_CONFIG_DIR,
+            )
+            print("[Smorfia] build_emoji_db.py completed successfully.")
+            return True
+        except Exception as e:
+            print(f"[Smorfia] build_emoji_db.py failed: {e}", file=sys.stderr)
+            self.show_message(
+                self.tr("update.error.title"),
+                self.tr("update.error.body", error=e),
+                Gtk.MessageType.ERROR,
+            )
+            return False
+
+    def _reload_emoji_data_and_ui(self):
+        """
+        Reload emoji data from disk and rebuild categories and the FlowBox.
+
+        This is called after a successful database update.
+        """
+        # Reload list, apply translations and favorites
+        self.emoji_list = self.load_emoji_data()
+        self.apply_translations_to_emoji_list()
+        self.apply_favorites_to_emoji_list()
+
+        # Rebuild the category combo
+        self.rebuild_category_combo()
+
+        # Rebuild FlowBox children
+        for child in list(self.flowbox.get_children()):
+            self.flowbox.remove(child)
+        for item in self.emoji_list:
+            child = self.create_child(item)
+            self.flowbox.add(child)
+        self.flowbox.show_all()
+
+        # Refresh filter, selection and status
+        self.on_filter_changed(None)
+        self.select_first_visible_emoji()
+        self.update_status()
 
     def on_menu_update_db(self, widget):
         """Show instructions and trigger build_emoji_db.py once emoji-test.txt is ready."""
@@ -1338,7 +2177,7 @@ class GeppEmoji(Gtk.Window):
         label2.set_xalign(0)
         label2.set_line_wrap(True)
         label2.set_markup(
-            self.tr("update.step2", base_dir=escape_markup(BASE_DIR))
+            self.tr("update.step2", base_dir=escape_markup(USER_CONFIG_DIR))
         )
         content.pack_start(label2, False, False, 0)
 
@@ -1351,63 +2190,14 @@ class GeppEmoji(Gtk.Window):
 
         dialog.destroy()
 
-        try:
-            subprocess.check_call(
-                [sys.executable, "build_emoji_db.py"],
-                cwd=BASE_DIR,
-            )
-        except Exception as e:
-            self.show_message(
-                self.tr("update.error.title"),
-                self.tr("update.error.body", error=e),
-                Gtk.MessageType.ERROR,
-            )
+        # Run the external build script; abort on error
+        if not self._run_build_emoji_db():
             return
 
-        self.emoji_list = self.load_emoji_data()
-        self.apply_translations_to_emoji_list()
-        self.apply_favorites_to_emoji_list()
-        self.categories = self.collect_categories(self.emoji_list)
+        # Reload emoji data and refresh the UI
+        self._reload_emoji_data_and_ui()
 
-        try:
-            self.category_combo.disconnect_by_func(self.on_filter_changed)
-        except Exception:
-            pass
-
-        self.category_combo.remove_all()
-        for cat in self.categories:
-            if cat == "All":
-                cat_id = "All"
-                label = self.tr("category.all")
-            elif cat == "Recent":
-                cat_id = "Recent"
-                label = self.tr("category.recent")
-            elif cat == "Favorites":
-                cat_id = "Favorites"
-                label = self.tr("category.favorites")
-            else:
-                cat_id = cat
-                label = cat
-            self.category_combo.append(cat_id, label)
-
-        if "Recent" in self.categories:
-            self.category_combo.set_active_id("Recent")
-        else:
-            self.category_combo.set_active(0)
-
-        self.category_combo.connect("changed", self.on_filter_changed)
-
-        for child in list(self.flowbox.get_children()):
-            self.flowbox.remove(child)
-        for item in self.emoji_list:
-            child = self.create_child(item)
-            self.flowbox.add(child)
-        self.flowbox.show_all()
-
-        self.on_filter_changed(None)
-        self.select_first_visible_emoji()
-        self.update_status()
-
+        # Inform the user that everything went fine
         self.show_message(
             self.tr("update.success.title"),
             self.tr("update.success.body"),
@@ -1541,6 +2331,12 @@ class GeppEmoji(Gtk.Window):
 
         row += 1
 
+        check_remember = Gtk.CheckButton(label=self.tr("prefs.remember_window"))
+        check_remember.set_active(bool(self.config.get("remember_window", True)))
+        grid.attach(check_remember, 0, row, 2, 1)
+
+        row += 1
+
         check_debug = Gtk.CheckButton(label=self.tr("prefs.debug"))
         check_debug.set_active(bool(self.config.get("debug", False)))
         grid.attach(check_debug, 0, row, 2, 1)
@@ -1575,6 +2371,7 @@ class GeppEmoji(Gtk.Window):
             new_max_recent = spin_recent.get_value_as_int()
             new_font = spin_font.get_value_as_int()
             new_lang = combo_lang.get_active_id() or "system"
+            new_remember = bool(check_remember.get_active())
             new_debug = bool(check_debug.get_active())
 
             lang_before = self.config.get("language", "system")
@@ -1585,6 +2382,7 @@ class GeppEmoji(Gtk.Window):
             self.config["max_recent"] = new_max_recent
             self.config["emoji_font_size"] = new_font
             self.config["language"] = new_lang
+            self.config["remember_window"] = new_remember
             self.config["debug"] = new_debug
 
             save_config(self.config)
@@ -1650,7 +2448,7 @@ class GeppEmoji(Gtk.Window):
         chooser.destroy()
 
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup_name = f"geppemoji-backup-{timestamp}.zip"
+        backup_name = f"smorfia-backup-{timestamp}.zip"
         backup_path = os.path.join(folder, backup_name)
 
         files_to_include = [
@@ -1703,10 +2501,21 @@ class GeppEmoji(Gtk.Window):
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
                 for name in ("emoji_recent.json", "emoji_translations.json", "config.json"):
-                    if name in zf.namelist():
-                        dest = os.path.join(BASE_DIR, name)
-                        with zf.open(name) as src, open(dest, "wb") as dst:
-                            dst.write(src.read())
+                    if name not in zf.namelist():
+                        continue
+
+                    if name == "emoji_recent.json":
+                        dest = RECENT_FILE
+                    elif name == "emoji_translations.json":
+                        dest = TRANSLATIONS_FILE
+                    elif name == "config.json":
+                        dest = CONFIG_FILE
+                    else:
+                        continue
+
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    with zf.open(name) as src, open(dest, "wb") as dst:
+                        dst.write(src.read())
 
             self.show_message(
                 self.tr("prefs.restore_done_title"),
@@ -1737,8 +2546,12 @@ class GeppEmoji(Gtk.Window):
 
 
 if __name__ == "__main__":
-    app = GeppEmoji()
+    # Create/migrate user files in ~/.config/Smorfia on first run
+    initialize_user_environment()
+
+    app = Smorfia()
     app.show_all()
     app.search_entry.grab_focus()
     app.update_status()
     Gtk.main()
+

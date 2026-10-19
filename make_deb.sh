@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
+# Smorfia (formerly GeppEmoji) - build a Debian/Ubuntu/Mint/LMDE package.
+#
+# Why: a system-wide install in /usr/share/smorfia with a `smorfia` command
+# and a menu entry. Only program files go in the package: user data lives in
+# ~/.config/Smorfia, is created on first start, and is never touched by apt.
+# The package replaces the old "geppemoji" package, if installed.
 set -e
 
-APP_NAME="geppemoji"
-VERSION="1.0.0-1"
+APP_NAME="smorfia"
+VERSION="2.0.0-1"
 PKG_NAME="${APP_NAME}_${VERSION}_all"
 
 echo "=============================="
@@ -12,75 +18,77 @@ echo "=============================="
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_ROOT="${ROOT_DIR}/build_deb"
 PKG_DIR="${BUILD_ROOT}/${PKG_NAME}"
+APP_DIR="${PKG_DIR}/usr/share/${APP_NAME}"
+BIN_DIR="${PKG_DIR}/usr/bin"
+DESKTOP_DIR="${PKG_DIR}/usr/share/applications"
+PIXMAP_DIR="${PKG_DIR}/usr/share/pixmaps"
+DOC_DIR="${PKG_DIR}/usr/share/doc/${APP_NAME}"
 
-# Pulisci build precedente
-rm -rf "${BUILD_ROOT}"
+rm -rf "${PKG_DIR}"
+mkdir -p "${APP_DIR}/locales" "${BIN_DIR}" "${DESKTOP_DIR}" "${PIXMAP_DIR}" "${DOC_DIR}"
+
+# --- Runtime files -----------------------------------------------------------
+install -m 755 "${ROOT_DIR}/smorfia.py"              "${APP_DIR}/"
+install -m 755 "${ROOT_DIR}/build_emoji_db.py"       "${APP_DIR}/"
+install -m 644 "${ROOT_DIR}/smorfia.png"             "${APP_DIR}/"
+install -m 644 "${ROOT_DIR}/emoji_data.json"         "${APP_DIR}/"
+install -m 644 "${ROOT_DIR}/emoji_translations.json" "${APP_DIR}/"
+install -m 644 "${ROOT_DIR}/README.md"               "${APP_DIR}/"
+install -m 644 "${ROOT_DIR}"/locales/*.json          "${APP_DIR}/locales/"
+install -m 644 "${ROOT_DIR}/smorfia.png"             "${PIXMAP_DIR}/smorfia.png"
+install -m 644 "${ROOT_DIR}/LICENSE"                 "${DOC_DIR}/copyright"
+install -m 644 "${ROOT_DIR}/CHANGELOG.md"            "${DOC_DIR}/"
+
+# --- Command -----------------------------------------------------------------
+cat > "${BIN_DIR}/${APP_NAME}" << 'EOF'
+#!/usr/bin/env bash
+exec /usr/bin/env python3 /usr/share/smorfia/smorfia.py "$@"
+EOF
+chmod 755 "${BIN_DIR}/${APP_NAME}"
+
+# --- Menu entry --------------------------------------------------------------
+cat > "${DESKTOP_DIR}/${APP_NAME}.desktop" << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=Smorfia
+GenericName=Emoji Picker
+Comment=Desktop emoji picker with search in your language (formerly GeppEmoji)
+Exec=smorfia
+Icon=smorfia
+Terminal=false
+Categories=Utility;GTK;
+Keywords=emoji;picker;smiley;GeppEmoji;
+StartupNotify=false
+EOF
+
+# --- Package metadata --------------------------------------------------------
 mkdir -p "${PKG_DIR}/DEBIAN"
-mkdir -p "${PKG_DIR}/usr/share/${APP_NAME}"
-mkdir -p "${PKG_DIR}/usr/share/applications"
-mkdir -p "${PKG_DIR}/usr/bin"
-
-echo "Copying app files into package tree ..."
-rsync -a \
-  --exclude ".git" \
-  --exclude "__pycache__" \
-  --exclude ".venv" \
-  --exclude "build_deb" \
-  "${ROOT_DIR}/" "${PKG_DIR}/usr/share/${APP_NAME}/"
-
-# ---- CONTROL file ----
-CONTROL_FILE="${PKG_DIR}/DEBIAN/control"
-cat > "${CONTROL_FILE}" <<EOF
+INSTALLED_SIZE=$(du -sk "${PKG_DIR}/usr" | cut -f1)
+cat > "${PKG_DIR}/DEBIAN/control" << EOF
 Package: ${APP_NAME}
 Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.10), python3-gi, python3-gi-cairo, gir1.2-gtk-3.0, xdotool
-Recommends: fonts-noto-color-emoji
-Maintainer: Francesco Bianchi <info@bybias.com>
-Description: Small desktop emoji picker written in Python + GTK3
- A lightweight emoji picker for Linux desktops, written in Python and GTK3.
+Installed-Size: ${INSTALLED_SIZE}
+Maintainer: Francesco Bianchi (FranzBias) <113999853+FranzBias@users.noreply.github.com>
+Homepage: https://github.com/FranzBias/Smorfia
+Depends: python3 (>= 3.10), python3-gi, python3-gi-cairo, gir1.2-gtk-3.0
+Recommends: xdotool
+Conflicts: geppemoji
+Replaces: geppemoji
+Description: Smorfia - desktop emoji picker (formerly GeppEmoji)
+ GTK 3 emoji picker with search in your language, your own tags,
+ recents, favorites, skin tones and auto-paste into the previous window.
 EOF
 
-echo "Created control file:"
-cat "${CONTROL_FILE}"
-echo
+# Standard permissions, whatever the builder's umask
+find "${PKG_DIR}" -type d -exec chmod 755 {} +
+chmod 644 "${DESKTOP_DIR}/${APP_NAME}.desktop"
 
-# ---- /usr/bin launcher ----
-LAUNCHER="${PKG_DIR}/usr/bin/${APP_NAME}"
-cat > "${LAUNCHER}" <<'EOF'
-#!/bin/sh
-exec python3 /usr/share/geppemoji/geppemoji.py "$@"
-EOF
-chmod +x "${LAUNCHER}"
-
-# ---- .desktop file ----
-DESKTOP_FILE="${PKG_DIR}/usr/share/applications/geppemoji.desktop"
-cat > "${DESKTOP_FILE}" <<EOF
-[Desktop Entry]
-Type=Application
-Name=GeppEmoji
-Comment=Small desktop emoji picker written in Python + GTK3
-Exec=${APP_NAME}
-Icon=/usr/share/${APP_NAME}/geppemoji.png
-Terminal=false
-Categories=Utility;GTK;Graphics;
-StartupNotify=false
-EOF
-
-echo "Building .deb package ..."
-mkdir -p "${BUILD_ROOT}"
-dpkg-deb --build "${PKG_DIR}"
+dpkg-deb --build --root-owner-group "${PKG_DIR}"
 
 echo
-echo "Done!"
-echo "You should find:"
-echo "  ${BUILD_ROOT}/${PKG_NAME}.deb"
-echo
-echo "To install it (as root):"
-echo "  sudo dpkg -i ${PKG_NAME}.deb"
-echo
-echo "If some dependencies are missing, you can fix them with:"
-echo "  sudo apt --fix-broken install"
-
+echo "Done: ${BUILD_ROOT}/${PKG_NAME}.deb"
+echo "Install it with:"
+echo "  sudo apt install ./build_deb/${PKG_NAME}.deb"
