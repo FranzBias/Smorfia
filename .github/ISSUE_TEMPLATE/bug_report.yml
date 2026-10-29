@@ -1,0 +1,76 @@
+# Why: most bug reports arrive without distro, desktop or X11/Wayland info,
+# and every first reply has to ask for it. This form collects it up front.
+name: Bug report
+description: Something does not work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem! You can write in English, Italian or German.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Click ...
+        3. See error
+    validations:
+      required: true
+  - type: input
+    id: app-version
+    attributes:
+      label: App version
+      placeholder: e.g. 2.1.0
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution and version
+      placeholder: e.g. Linux Mint 22.2, Kubuntu 26.04
+    validations:
+      required: true
+  - type: dropdown
+    id: desktop
+    attributes:
+      label: Desktop environment
+      options:
+        - Cinnamon
+        - KDE Plasma
+        - GNOME
+        - Xfce
+        - MATE
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: session
+    attributes:
+      label: Display server
+      description: "Run `echo $XDG_SESSION_TYPE` in a terminal if you are not sure."
+      options:
+        - X11
+        - Wayland
+        - I don't know
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Terminal output
+      description: Start the app from a terminal and paste any error message here.
+      render: shell
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, workarounds, ideas for a fix.

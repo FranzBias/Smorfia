@@ -1,0 +1,2 @@
+# Why: forces reporters to pick a form, so no issue arrives without the basic info.
+blank_issues_enabled: false

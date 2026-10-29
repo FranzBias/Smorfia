@@ -1,0 +1,33 @@
+# Why: feature requests are easier to evaluate when the use case is explicit.
+name: Feature request
+description: Suggest an idea or an improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for your idea! You can write in English, Italian or German.
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+      description: What would you like the app to do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why would it help?
+      description: Describe the situation where you would use it.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Have you tried other ways or other apps?
+  - type: textarea
+    id: code
+    attributes:
+      label: Do you already have a solution?
+      description: If you have code or a patch, describe it here. A pull request is very welcome, and every contributor is credited in the README.
